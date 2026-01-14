@@ -1,6 +1,10 @@
 import math
 import random
-
+from collections import Counter
+from numba import njit
+# usage = Counter(
+#     path_id[(i, solution[i])] for i in range(n)
+# )
 
 class OptimalizationFunctions:
 
@@ -40,48 +44,6 @@ class OptimalizationFunctions:
                     score += 1
 
         return score
-
-    @staticmethod
-    def simulated_annealing(
-            requests,
-            T0=100.0,
-            Tmin=0.1,
-            alpha=0.95,
-            iters_per_T=100
-    ):
-        n = len(requests)
-
-        current = [
-            random.randrange(len(requests[i])) for i in range(n)
-        ]
-        current_score = OptimalizationFunctions.grooming_score(current, requests)
-
-        best = current[:]
-        best_score = current_score
-
-        T = T0
-
-        while T > Tmin:
-            for _ in range(iters_per_T):
-                # generowanie sąsiada
-                neighbor = current[:]
-                i = random.randrange(n)
-                neighbor[i] = random.randrange(len(requests[i]))
-
-                neighbor_score = OptimalizationFunctions.grooming_score(neighbor, requests)
-                delta = neighbor_score - current_score
-
-                if delta > 0 or random.random() < math.exp(delta / T):
-                    current = neighbor
-                    current_score = neighbor_score
-
-                    if current_score > best_score:
-                        best = current[:]
-                        best_score = current_score
-
-            T *= alpha
-
-        return best, best_score
 
     @staticmethod
     def prepare_data(requests):
@@ -135,17 +97,21 @@ class OptimalizationFunctions:
             requests,
             contains,
             path_id,
-            T0=3000.0,
+            T0=1000.0,
             Tmin=0.1,
             alpha=0.99,
-            iters_per_T=1000
+            iters_per_T=100
     ):
         import random, math
 
         n = len(requests)
 
+
         solution = [random.randrange(len(requests[i])) for i in range(n)]
         score = OptimalizationFunctions.grooming_score(solution, requests)
+        usage = Counter(
+            path_id[(i, solution[i])] for i in range(n)
+        )
 
         best = solution[:]
         best_score = score
@@ -161,13 +127,20 @@ class OptimalizationFunctions:
                 if new == old:
                     continue
 
+                # old_pid = path_id[(k, old)]
+                # new_pid = path_id[(k, new)]
+
                 delta = OptimalizationFunctions.delta_grooming(
-                    solution, requests, k, old, new, contains, path_id
-                )
+                    solution, requests, k, old, new, contains, path_id)
+                # + OptimalizationFunctions.delta_concentration(
+                    # old_pid, new_pid, usage, weight=0.9)
 
                 if delta > 0 or random.random() < math.exp(delta / T):
                     solution[k] = new
                     score += delta
+
+                    # usage[old_pid] -= 1
+                    # usage[new_pid] += 1
 
                     if score > best_score:
                         best = solution[:]
@@ -176,4 +149,87 @@ class OptimalizationFunctions:
             T *= alpha
 
         return best, best_score
+
+
+    @staticmethod
+    def simulated_annealing_weighted(
+            requests,
+            contains,
+            path_id,
+            blocked_count,
+            W=80.0,
+            T0=500.0,
+            Tmin=0.1,
+            alpha=0.70,
+            iters_per_T=10
+    ):
+        import random, math
+
+        n = len(requests)
+
+        # solution = [random.randrange(len(requests[i])) for i in range(n)]
+        solution = [0] * n
+
+        blocked, transceivers = blocked_count(solution)
+        # grooming = OptimalizationFunctions.grooming_score(
+        #     solution, requests
+        # )
+
+        score = transceivers - W * blocked
+        # score = grooming
+
+
+        best = solution[:]
+        best_score = score
+
+        T = T0
+
+        while T > Tmin:
+            for _ in range(iters_per_T):
+                k = random.randrange(n)
+                old = solution[k]
+                new = random.randrange(len(requests[k]))
+                # usage = Counter(path_id[(i, solution[i])] for i in range(n))
+                #
+                # # wybór nowej ścieżki z preferencją już używanych superkanałów
+                # if random.random() < 0.7:
+                #     used = list(usage.keys())
+                #     candidates = [
+                #         j for j in range(len(requests[k]))
+                #         if path_id[(k, j)] in used and j != old
+                #     ]
+                #     if candidates:
+                #         new = random.choice(candidates)
+                #     else:
+                #         new = random.randrange(len(requests[k]))
+                # else:
+                #     new = random.randrange(len(requests[k]))
+
+                if new == old:
+                    continue
+
+                solution[k] = new
+
+                new_blocked, new_transceivers = blocked_count(solution)
+                # new_grooming = OptimalizationFunctions.delta_grooming(
+                #     solution, requests, k, old, new, contains, path_id
+                # )
+
+                new_score = new_transceivers - W * new_blocked
+                delta = new_score - score
+
+                if delta > 0 or random.random() < math.exp(delta / T):
+                    blocked = new_blocked
+                    transceivers = new_transceivers
+                    score = new_score
+
+                    if score > best_score:
+                        best = solution[:]
+                        best_score = score
+                else:
+                    solution[k] = old
+
+            T *= alpha
+
+        return best, transceivers, blocked
 

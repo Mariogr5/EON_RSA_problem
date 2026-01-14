@@ -2,6 +2,8 @@ import networkx as nx
 from DataPreparation.DataLoader import TYPE, DataLoader
 from EON.Edge import Edge
 from EON.Node import Node
+from EON.Supercanal import Supercanal
+from numba import njit
 
 SLOT_CAPACITY = 12.5
 
@@ -30,7 +32,7 @@ class Network(nx.DiGraph):
             demand.possible_paths = demand.convert_path(list(
                 nx.all_simple_paths(self, source=str(demand.source_node), target=str(demand.destination_node))),
                 self.edges_container)
-            demand.possible_paths = demand.possible_paths[:10]
+            demand.possible_paths = demand.possible_paths[:25]
 
     def load_network_structure(self, edges_in_node):
 
@@ -42,11 +44,10 @@ class Network(nx.DiGraph):
             weight = self[edge[0]][edge[1]]["weight"]
             self.edges_container.append(Edge(edge[0], edge[1], weight))
 
-
     def check_limitations(self):
         for demand in self.demands:
             if demand.grooming:
-                return True
+                continue
             if demand.selected_slots_idx == []:
                 return False
             for i in range(1, len(demand.selected_slots_idx)):
@@ -62,90 +63,235 @@ class Network(nx.DiGraph):
         for edge in self.edges_container:
             edge.slots = [-1] * 320
 
-    def check_number_of_groomings_and_mark(self):
-        for demand in self.demands:
-            if demand.grooming:  # TODO: NEW
-                continue
-            for demand_to_groom in self.demands:
-                if demand_to_groom == demand or demand_to_groom == demand.groomed_to:
-                    continue
-                not_groomed = False
-                for edge in demand.selected_path.edges:
-                    if not edge in demand_to_groom.selected_path.edges:
-                        not_groomed = True
-                        break
-                if not not_groomed:
-                    demand.grooming = True
-                    if not demand_to_groom.groomed_to is None:
-                        demand.groomed_to = demand_to_groom.groomed_to
-                        demand_to_groom.groomed_to.groomings_demands.append(demand)
-                        break
+    # @staticmethod
+    # def path_is_subset(d1, d2):
+    #     """Czy ścieżka d1 zawiera się w ścieżce d2"""
+    #     return set(d1.selected_path.edges).issubset(
+    #         set(d2.selected_path.edges)
+    #     )
 
-                    demand.groomed_to = demand_to_groom
-                    demand_to_groom.groomings_demands.append(demand)
-                    break
-        number_of_groomings = 0
 
-        # Process recurention in groomings
-        next = True
-        while (next):
-            next = False
-            for demand in self.demands:
-                if demand.grooming and len(demand.groomings_demands) != 0:
-                    next = True
-                    if demand.groomed_to in demand.groomings_demands:
-                        demand.groomings_demands.remove(demand.groomed_to)
-                        demand.groomed_to.grooming = False
-                    for groomed_demand in demand.groomings_demands:
-                        demand.groomings_demands.remove(groomed_demand)
-                        groomed_demand.groomed_to = demand.groomed_to
-                        demand.groomed_to.groomings_demands.append(groomed_demand)
+    # @staticmethod
+    # def is_subpath(p_short, p_long):
+    #     """Sprawdza czy p_short jest podścieżką p_long"""
+    #     for i in range(len(p_long) - len(p_short) + 1):
+    #         if p_long[i:i + len(p_short)] == p_short:
+    #             return True
+    #     return False
 
-        ####
+    @staticmethod
+    def is_subpath(p_short, p_long):
+        edges_short = p_short.edges
+        edges_long = p_long.edges
 
-        # for demand in self.demands:
-        #     if demand.grooming:
-        #         number_of_groomings += 1
-        #         # demand.selected_path.print_path()
-        #         # print("Groomed: " + str(demand.groomed_to.demand_no))
-        #         # print("Groommings: " + str([demand.demand_no for demand in demand.groomings_demands]))
-        #     else:
-        #         pass
-        #         # print("Not groomed:")
-        #         # demand.selected_path.print_path()
-        #         # print("Groommings: " + str([demand.demand_no for demand in demand.groomings_demands]))
+        for i in range(len(edges_long) - len(edges_short) + 1):
+            if edges_long[i:i + len(edges_short)] == edges_short:
+                return True
+        return False
 
-        # print(f"Groomings: {number_of_groomings}")
-
-    def select_modulation_logic(self):
-
-        for demand in self.demands:
-            if demand.actual_bitrate == 0:
-                continue
-            demand.bitrate_with_gromming += demand.actual_bitrate
-            demand.actual_bitrate = 0
-            for groomed_demand in demand.groomings_demands:
-                demand.bitrate_with_gromming += groomed_demand.actual_bitrate
-                groomed_demand.actual_bitrate = 0
-            demand.path_lenght = demand.selected_path.path_lenght
-
-    def allocate_network_slots(self):
-        for demand in self.demands:
-            demand_ok = False
-            if demand.bitrate_with_gromming == 0:
-                continue
-            for slot_no in range(320 - demand.required_slots):
-                slots = list(range(slot_no, slot_no + demand.required_slots))
-                demand.selected_slots_idx = slots
-                if demand.check_if_allocation_is_possible(self.edges_container):
-                    demand.allocate_slots(slots, self.edges_container)
-                    demand_ok = True
-                    break
-            if demand_ok == False:
-                return False
+    @staticmethod
+    def can_merge(sc1, sc2):
+        """Czy superkanały można połączyć topologicznie"""
+        if sc1.selected_path == sc2.selected_path:
             return True
 
-if __name__ == '__main__':
-    graph = Network()
-    graph.load_data(TYPE.POL12, 0, 200)
-    print(len(graph.edges_container))
+        if sc1.path_lenght <= sc2.path_lenght:
+            return Network.is_subpath(sc1.selected_path, sc2.selected_path)
+        else:
+            return Network.is_subpath(sc2.selected_path, sc1.selected_path)
+
+    @staticmethod
+    def spectral_gain(sc1, sc2):
+        longer_superchannel = None
+        if sc1.path_lenght > sc2.path_lenght:
+            longer_superchannel = sc1
+            shorter_superchannel = sc2
+        else:
+            longer_superchannel = sc2
+            shorter_superchannel = sc1
+
+        sc1.select_modulation_with_min_transceivers()
+        sc2.select_modulation_with_min_transceivers()
+        slots_before = longer_superchannel.required_slots
+        # slots_before = sc1.required_slots + sc2.required_slots
+
+
+        longer_superchannel.merged_bitrate += shorter_superchannel.merged_bitrate
+        longer_superchannel.select_modulation_with_min_transceivers()
+        slots_merged = longer_superchannel.required_slots
+        longer_superchannel.merged_bitrate -= shorter_superchannel.merged_bitrate
+
+        # path_len = max(sc1.path_lenght, sc2.path_lenght)
+        # modulation = select_modulation(path_len)
+
+        # total_bitrate = sum(sc1.bitrate) + sum(sc2.bitrate)
+
+        # slots_merged = required_slots(total_bitrate, modulation)
+        # slots_before = (
+        #         required_slots(sum(sc1.bitrate), sc1.modulation) +
+        #         required_slots(sum(sc2.bitrate), sc2.modulation)
+        # )
+
+        return slots_before - slots_merged
+
+    def check_if_allocation_is_possible_sch(self, channel):
+        for edge in channel.selected_path.edges:
+            for edge_c in self.edges_container:
+                if edge is edge_c:
+                    for slot in channel.selected_slots_idx:
+                        if edge_c.slots[slot] != -1:
+                            return False
+        return True
+
+    def allocate_slots(self, channel):
+        for edge in channel.selected_path.edges:
+            for edge_c in self.edges_container:
+                if edge is edge_c:
+                    for slot in channel.selected_slots_idx:
+                        edge_c.slots[slot] = channel.id
+
+    def allocate_network_slots_sch(self, superchannels):
+
+        for channel in superchannels:
+            channel_ok = False
+            for slot_no in range(320 - channel.required_slots + 1):
+                slots = list(range(slot_no, slot_no + channel.required_slots))
+                channel.selected_slots_idx = slots
+                if self.check_if_allocation_is_possible_sch(channel):
+                    self.allocate_slots(channel)
+                    channel_ok = True
+                    channel.blocked = False
+                    break
+                if channel_ok == False:
+                    channel.selected_slots_idx = []
+                    continue
+
+    def allocate_network_slots_sch_best_fit(self, superchannels):
+
+        superchannels.sort(key=lambda d: d.required_slots)
+
+        TOTAL_SLOTS = 320
+
+        for channel in superchannels:
+            channel_ok = False
+            best_slots = None
+            best_cost = float("inf")
+
+            for slot_no in range(TOTAL_SLOTS - channel.required_slots + 1):
+                slots = list(range(slot_no, slot_no + channel.required_slots))
+                channel.selected_slots_idx = slots
+
+                if self.check_if_allocation_is_possible_sch(channel):
+                    channel_ok = True
+                    channel.blocked = False
+                    # heurystyka kosztu – im mniejszy tym lepiej
+                    left_gap = slot_no
+                    right_gap = TOTAL_SLOTS - (slot_no + channel.required_slots)
+                    cost = left_gap + right_gap
+
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_slots = slots
+
+            if best_slots is None or not channel:
+                channel.selected_slots_idx = []
+                continue
+            channel.selected_slots_idx = best_slots
+            self.allocate_slots(channel)
+
+        return True
+
+    @staticmethod
+    def spectrum_aware_merge_fast(superchannels):
+        improved = True
+
+        while improved:
+            improved = False
+
+            for i, sc1 in enumerate(superchannels):
+                best_gain = 0
+                best_j = None
+
+                for j, sc2 in enumerate(superchannels):
+                    if i == j:
+                        continue
+
+                    if not Network.can_merge(sc1, sc2):
+                        continue
+
+                    gain = Network.spectral_gain(sc1, sc2)
+
+                    if gain >= best_gain:
+                        best_gain = gain
+                        best_j = j
+                        break
+
+                if best_j is not None:
+                    sc2 = superchannels[best_j]
+
+                    new_sc = Supercanal(
+                        id=f"{sc1.id}_{sc2.id}",
+                        demands=sc1.demands + sc2.demands
+                    )
+
+                    new_sc.selected_path = (
+                        sc1.selected_path if sc1.path_lenght >= sc2.path_lenght else sc2.selected_path
+                    )
+                    new_sc.path_lenght = new_sc.selected_path.path_lenght
+                    new_sc.select_modulation_with_min_transceivers()
+
+                    for idx in sorted([i, best_j], reverse=True):
+                        superchannels.pop(idx)
+
+                    superchannels.append(new_sc)
+
+                    improved = True
+                    break  # restart pętli
+
+        return superchannels
+
+    @staticmethod
+    def spectrum_aware_merge_faster(superchannels):
+        i = 0
+        while i < len(superchannels):
+            sc1 = superchannels[i]
+            merged = False
+
+            j = i + 1
+            while j < len(superchannels):
+                sc2 = superchannels[j]
+
+                if Network.can_merge(sc1, sc2):
+                    gain = Network.spectral_gain(sc1, sc2)
+
+                    if gain >= 0:  # ← zachowujemy spectral_gain
+                        # wybór dłuższej ścieżki
+                        if sc1.path_lenght >= sc2.path_lenght:
+                            selected_path = sc1.selected_path
+                        else:
+                            selected_path = sc2.selected_path
+
+                        new_sc = Supercanal(
+                            id=f"{sc1.id}_{sc2.id}",
+                            demands=sc1.demands + sc2.demands
+                        )
+
+                        new_sc.selected_path = selected_path
+                        new_sc.path_lenght = selected_path.path_lenght
+                        new_sc.select_modulation_with_min_transceivers()
+
+                        # zastępujemy sc1, usuwamy sc2
+                        superchannels[i] = new_sc
+                        superchannels.pop(j)
+
+                        merged = True
+                        # i = max(i - 1, 0)
+                        break  # 🔴 FIRST-FIT → koniec lokalnego szukania
+
+                j += 1
+
+            if not merged:
+                i += 1  # przechodzimy dalej tylko jeśli nie było merge
+
+        return superchannels
+

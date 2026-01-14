@@ -1,82 +1,70 @@
+import csv
+import os
 import time
 import copy
 
 from EON.Network import Network, TYPE
 from OptimalizationFunctions import *
+from EON.Supercanal import Supercanal
+
 
 class App:
     def __init__(self):
         self.demands_no = 100
-        # self.used_sets = [used_sets_template] * self.demands_no
         self.network = None
-        # self.network = Network()
-        # self.network.load_data(TYPE.POL12, 1, self.demands_no)
         self.best = []
+        self.superchannels = []
 
-    def first_fit(self, max_retries):
-        rerouting = False
-        for demand in self.network.demands:
-            demand.selected_path = demand.possible_paths[0]
+    def first_fit(self):
+        return [0] * self.demands_no
 
-        demand_copy = copy.deepcopy(self.network.demands)
-        edge_list_copy = copy.deepcopy(self.network.edges_container)
+    def calculate_network_sch(self, best):
+        buffer_network = copy.deepcopy(self.network)
+        for i, path in enumerate(best):
+            self.network.demands[i].selected_path = self.network.demands[i].possible_paths[path]
 
-        for attempt in range(max_retries):
-            self.network.demands = demand_copy
-            self.network.edges_container = edge_list_copy
-            self.network.reset_slots()
-            if rerouting:
-                random.shuffle(self.network.demands)
-            for i, demand in enumerate(self.network.demands):
-                demand_ok = False
-                for path in demand.possible_paths:
-                    demand.selected_path = path
-                    demand.path_lenght = path.path_lenght
-                    self.network.check_number_of_groomings_and_mark()
-                    self.network.select_modulation_logic()
-                    slots_allocation_possible = self.network.allocate_network_slots()
-                    network_limitations_possible = self.network.check_limitations()
-                    if slots_allocation_possible and network_limitations_possible:
-                        demand_ok = True
-                        break
-                if demand_ok == False:
-                    demand.selected_path = demand.possible_paths[0]
-                    rerouting = True
-                    break
-                else:
-                    rerouting = False
-                    break
+        superchannels = []
+        for i, demand in enumerate(self.network.demands):
+            superchannels.append(Supercanal(i, [demand]))
 
-            if rerouting == False:
-                break
+        self.network.spectrum_aware_merge_fast(superchannels)
 
-        if rerouting == True:
-            return 9999
+        number_of_transceivers = len(superchannels) * 2
 
-        transceivers = 0
-        for demand in self.network.demands:
-            if demand.bitrate_with_gromming != 0:
-                transceivers += demand.number_of_transceivers
+        average_number_of_transceivers = number_of_transceivers
 
-        return transceivers
+        for channel in superchannels:
+            channel.select_modulation_with_min_transceivers()
+
+        self.network.allocate_network_slots_sch(superchannels)
+
+        possible = True
+        blocked = 0
+        for channel in superchannels:
+            if channel.blocked:
+                possible = False
+                blocked += len(channel.demands)
+
+        # possible = self.network.check_limitations()
+        self.network = buffer_network
+        return average_number_of_transceivers, blocked
 
     def simulated_annealing_algorithm(self, i, previous_transceivers):
-
         requests = []
-        for demand in self.network.demands:
-            paths = OptimalizationFunctions.convert_path(demand.possible_paths)
-            requests.append(paths)
 
         if i == 0 or previous_transceivers == 9999:
+            for demand in self.network.demands:
+                paths = OptimalizationFunctions.convert_path(demand.possible_paths)
+                requests.append(paths)
             start = time.perf_counter()
-
             containts, path_id = OptimalizationFunctions.prepare_data(requests)
-
+            # best, best_score, blocked = OptimalizationFunctions.simulated_annealing_weighted(requests, containts,
+            #                                                                                  path_id,
+            #                                                                                  self.calculate_network_sch,
+            #                                                                                  )
             best, best_score = OptimalizationFunctions.simulated_annealing_fast(requests, contains=containts,
                                                                                 path_id=path_id)
-
-            # best, best_score = OptimalizationFunctions.simulated_annealing(requests)
-
+            # best = self.first_fit()
             self.best = best
             end = time.perf_counter()
             print(f"TIme: {end - start:.6f} s")
@@ -84,58 +72,118 @@ class App:
         for i, path in enumerate(self.best):
             self.network.demands[i].selected_path = self.network.demands[i].possible_paths[path]
 
-        self.network.check_number_of_groomings_and_mark()
-        self.network.select_modulation_logic()
-        number_of_transceivers = 0
-        for demand in self.network.demands:
-            if demand.bitrate_with_gromming != 0:
-                # print(f"Demand no:  {demand.demand_no}, Lenght: {demand.path_lenght}, bitrate: {demand.bitrate_with_gromming},"
-                #       f" Modulation: {demand.selected_modulation.name},"
-                #       f" Groomings: {len(demand.groomings_demands)}, Transceivers: {demand.number_of_transceivers}")
-                number_of_transceivers += demand.number_of_transceivers
+        superchannels = []
+        for i, demand in enumerate(self.network.demands):
+            superchannels.append(Supercanal(i, [demand]))
 
-        # average_number_of_transceivers = math.ceil(number_of_transceivers/ len(self.network.demands))
-        # average_number_of_transceivers = number_of_transceivers/ len(self.network.demands)
+        superchannels = self.network.spectrum_aware_merge_fast(superchannels)
+
+        for channel in superchannels:
+            channel.select_modulation_with_min_transceivers()
+
+        number_of_transceivers = len(superchannels) * 2
 
         average_number_of_transceivers = number_of_transceivers
 
-        possible = self.network.allocate_network_slots()
+        # self.network.allocate_network_slots_sch(superchannels)
+        self.network.allocate_network_slots_sch_best_fit(superchannels)
 
-        possible = self.network.check_limitations()
+        possible = True
+        blocked = 0
+        for channel in superchannels:
+            if channel.blocked:
+                possible = False
+                blocked += len(channel.demands)
 
         if possible:
-            return average_number_of_transceivers
+            return average_number_of_transceivers, blocked
         else:
-            return 9999
+            return average_number_of_transceivers, blocked
 
     def iteration_action(self):
 
         transceivers_list = []
+        avg_blocked = 0
         transceivers = 0
         for i in range(288):
-
+            network_copy = copy.deepcopy(self.network)
             app.network.reset_slots()
             for demand in self.network.demands:
                 demand.set_bitrate(demand.list_of_bitrates[i])
-            transceivers_no = app.simulated_annealing_algorithm(i, transceivers)
-            transceivers = result
-            # transceivers_no = app.first_fit_v2(10)
+            transceivers_no, blocked_no = app.simulated_annealing_algorithm(i, transceivers)
+            transceivers = transceivers_no
+            # blocked_no = 0
+            # if not possible:
+            #     transceivers = 0
+            #     for demand in self.network.demands:
+            #         if not demand.grooming:
+            #             if demand.selected_slots_idx == []:
+            #                 blocked_no += len(demand.groomings_demands) + 1
+            # i-=1
+            # print("Dupa")
+            # continue
+            # if blocked_no/self.demands_no * 100 > 0.2:
+            #     transceivers = 9999
+            #     i-=1
+            # print(transceivers_no)
+            self.print_function(transceivers_no, i, self.demands_no, blocked_no)
+            avg_blocked += blocked_no
             transceivers_list.append(transceivers_no)
+            self.network = network_copy
         transceivers = sum(transceivers_list) / len(transceivers_list)
-        return transceivers
+        print(f"Average Blocked: {avg_blocked / 288}")
+        return transceivers, avg_blocked / 288
         # return math.ceil(transceivers / self.demands_no)
+
+    def print_function(self, transceivers, iteration, demands_no, blocked_no):
+        print(
+            f"Demands: {demands_no}, Iteration: {iteration}, Blocked: {blocked_no}, Transceivers: {transceivers}")
 
 
 if __name__ == '__main__':
     app = App()
 
-    result = False
-    list_of_bitrates = [50]
-    for i in range(1):
-        app = App()
-        app.demands_no = list_of_bitrates[i]
-        app.network = Network()
-        app.network.load_data(TYPE.US26, 0, app.demands_no)
-        app.network.reset_slots()
-        print(f"Transceivers {app.iteration_action()}")
+    file_path_base = r"C:\pythonProject\results"
+    file_path = file_path_base + r"\POL12_AG.csv"
 
+    avg_blocked = [0] * 10
+    avg_transceivers = [0] * 10
+    bitrates_no = 2
+    list_of_bitrates = [750, 1000]
+    # list_of_bitrates = [500, 750, 1000]
+
+    result = False
+    for j in range(1):
+        # avg_transceivers = 0
+        # list_of_bitrates = [999]
+        for i in range(bitrates_no):
+            app = App()
+            app.demands_no = list_of_bitrates[i]
+            app.network = Network()
+            app.network.load_data(TYPE.US26, j, app.demands_no)
+            app.network.reset_slots()
+            transceivers, blocked = app.iteration_action()
+
+            if_file_exists = os.path.isfile(file_path)
+
+            with open(file_path, mode="a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+
+                if not if_file_exists:
+                    writer.writerow(["Folder", "Demands_no", "Average_Transceivers", "Average_blocked"])
+
+                writer.writerow([f"demands_{j}", list_of_bitrates[i], transceivers, blocked])
+
+            avg_blocked[i] += blocked
+            avg_transceivers[i] += transceivers
+
+    new_avg_blocked = [x / 10 for x in avg_blocked]
+    new_avg_transceivers = [x / 10 for x in avg_transceivers]
+    for i in range(bitrates_no):
+        with open(file_path, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([f"Average", list_of_bitrates[i], new_avg_transceivers[i],
+                             (new_avg_blocked[i] / list_of_bitrates[i]) * 100])
+    # for blocked, transceivers in zip(avg_blocked, avg_transceivers):
+
+    # print(f"Transceivers {app.iteration_action()}")

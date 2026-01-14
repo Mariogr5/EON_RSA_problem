@@ -58,40 +58,6 @@ class DataLoader:
 
         return list_of_demands
 
-    # def interprete_path_file(self, node_list, edge_container):
-    #     with open(self.network_topology_file_path, "r", encoding="utf-8") as f:
-    #         lines = f.readlines()
-    #         for i, line in enumerate(lines):
-    #             line = line.rstrip("\n")
-    #             lines[i] = line.split("\t")
-    #     possible_paths = lines[1:]
-    #     edge_counts = [len(node.edges) for node in node_list]
-    #
-    #     edge_dictionary = {}
-    #
-    #     node_no = "0"
-    #     for i, char in enumerate(line.split("\t")):
-    #         edge_dictionary[node_no] =
-    #
-    #     path_list = []
-    #
-    #     index = 0
-    #     for node in node_list:
-    #
-    #             for edge in node.edges:
-    #
-    #                     for i in range(edge_counts[int(node.name)]):
-    #
-    #
-    #         for i in range(0, 30):
-    #             possible_path = []
-    #             for i, char in enumerate(line.split("\t")):
-    #                 if int(char) == 1:
-
-
-
-
-
 if __name__ == '__main__':
     loader = DataLoader(TYPE.POL12)
     loader.get_demands(0, 1)
